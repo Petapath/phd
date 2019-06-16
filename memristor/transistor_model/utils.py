@@ -1,4 +1,5 @@
 import sys
+import numpy as np
 
 
 # this is equialent of C++ bind 
