@@ -5,24 +5,7 @@ from scipy.optimize import root
 from scipy.stats import linregress
 %matplotlib inline
 import matplotlib.pyplot as plt
-import sys
 
-
-# this is equialent of C++ bind 
-#
-def partial(func, *args, **kwargs):
-    def f(*args_rest, **kwargs_rest):
-        kw = kwargs.copy()
-        kw.update(kwargs_rest)
-        return func(*(args + args_rest), **kw) 
-    return f
-
-
-# we use this to convert discrete domains into
-# continous functions using the partial defined above
-#
-def interpolator(tt,vv,t):
-    return np.interp(t,tt,vv)
 
 
 class TransistorModel:
