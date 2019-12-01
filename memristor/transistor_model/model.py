@@ -1,6 +1,7 @@
 import numpy as np
 import sympy as sp
 from scipy.integrate import odeint
+from scipy.integrate import ode
 from scipy.optimize import root
 
 
@@ -13,22 +14,37 @@ class TransistorModel:
 
     # constructor
     #
-    def __init__(self, Cion, Rion):
+    def __init__(self, tps, Cion, Rion):
         
-        self.Cion=7.2e-6
-        self.Rion=6.7e4
+        self.timeStepsPerSecond=tps
+        self.Cion=Cion
+        self.Rion=Rion
+
+    # applies a given model for a period of T seconds 
+    # v0 is a hint for the linear solver 
+    # where to start searching for the solution
+    # 
+    # returns only the final value of j and q 
+    # (the latter needed for the next interation)
+    # 
+    def apply_model( self, model, Qstart, v0, vfunc, tt ):
+
+        (j,v,q_swipe) = model(Qstart,v0,tt,vfunc)
         
+        return (j,q_swipe)
+
     # single transistor model
     # the tt defines the domain on which 
     # to evaluate the vfunc
     #
-    def apply_1T_model(self,Qstart,tt,vfunc):
+    def apply_1T_model(self,Qstart,v0,tt,vfunc):
 
         v_array=np.array([vfunc(t) for t in tt])
-        q_swipe=self.evolve_charge(Qstart,tt,vfunc)
+        q_swipe=self.evolve_charge_alt(Qstart,tt,vfunc)
 
         return (self.j1_1t(q_swipe/self.Cion,v_array),v_array,q_swipe)     
     
+
     # two transistor model
     # the tt defines the domain on which 
     # to evaluate the vfunc
@@ -36,17 +52,34 @@ class TransistorModel:
     def apply_2T_model(self,Qstart,v0,tt,vfunc):
 
         v_array=np.array([vfunc(t) for t in tt])
-        q_swipe=self.evolve_charge(Qstart,tt,vfunc)
+        q_swipe=self.evolve_charge_alt(Qstart,tt,vfunc)
 
         (v,j)=self.solve_for_j(q_swipe,v_array,self.jphoto,self.Cion,v0)
 
         return (j,v,q_swipe)     
     
+
+    # compute the j for a given point in time 
+    # using the 
+    # two transistor model
+    # the tt defines the domain on which 
+    # to evaluate the vfunc
+    # 
+    # to achieve this, we need to evolve full charge 
+    # but only solve for a single point for (v,j)
+    #
+    def jv_measure_single_point_2T_model(self,Qstart,v0,tt,vfunc):
+
+        v_array=np.array([vfunc(t) for t in tt])
+        q_swipe=self.evolve_charge_alt(Qstart,tt,vfunc)
+
+        (v,j)=self.solve_for_j_scalar(q_swipe[-1],v_array[-1],self.jphoto,self.Cion,v0)
+
+        return (j,v,q_swipe)     
     
     #
     # private
     #
-
 
     # defines a differential equation for the 
     # evolution of change vs applied voltage over time 
@@ -69,6 +102,36 @@ class TransistorModel:
 
         return q    
 
+
+    # here, we are simply swapping round parameters,
+    # as ode want them in different order than odeint
+
+    def memdiode_alt(self,t,q,vfunc):
+        return self.memdiode(q,t,vfunc)
+    
+    def evolve_charge_alt(self,Qstart,tt,vfunc):
+        
+        # step size
+        dt = tt[1]-tt[0]
+        
+        q0 = [Qstart, 0]
+        r = ode(self.memdiode_alt).set_integrator('dop853', method='bdf') 
+        r.set_initial_value(q0, tt[0]).set_f_params(vfunc)
+
+        # array for outputs
+        qout = np.zeros((len(tt), len(q0)))
+        
+        tfin = tt[len(tt)-1]
+        i=0
+        while r.successful() and r.t < tfin:
+            qout[i, :] = r.integrate(r.t+dt)
+            i=i+1
+            #print(r.t+dt, r.integrate(r.t+dt))
+                    
+        q=qout[:,0]
+        q=q.reshape(len(tt))
+        
+        return q
 
     
     ###################################################################
@@ -111,10 +174,10 @@ class TransistorModel:
     #
     def j1_2t(self,Vn,v1,V):
                 
-        j = self.js1 * ( np.exp((self.e*(v1-Vn))/(self.m1*self.kb*self.T),dtype=np.float64) - \
+        j1 = self.js1 * ( np.exp((self.e*(v1-Vn))/(self.m1*self.kb*self.T),dtype=np.float64) - \
                          np.exp((self.e*(v1-V))/(self.m1*self.kb*self.T),dtype=np.float64) )
 
-        return j
+        return j1
 
     # C=Q/V
     #
@@ -126,10 +189,10 @@ class TransistorModel:
     #
     def j2_2t(self,Vn,v2,V):
                 
-        j = self.js2 * ( np.exp((self.e*v2)/(self.m1*self.kb*self.T)) - \
-                         np.exp((self.e*(v2-Vn))/(self.m1*self.kb*self.T)) )
+        j2 = self.js2 * ( np.exp((self.e*v2)/(self.m1*self.kb*self.T),dtype=np.float64) - \
+                         np.exp((self.e*(v2-Vn))/(self.m1*self.kb*self.T),dtype=np.float64) )
 
-        return j
+        return j2
 
     # j2-j1-jphoto=0
     #
@@ -160,6 +223,23 @@ class TransistorModel:
         return (v_n,j_array)
 
 
+    # j is equivalent to simply j2
+    # first, we need to solve: j2=j1+jphoto for the unknown Vn
+    # then substitue Vn into expression for j2
+    #
+    def solve_for_j_scalar(self,q,V,jphoto,C,v0):
+
+        v2=q/C
+        v1=V-q/C       
+        
+        v_n=root(self.kirchoff,x0=v0,args=(v1,v2,V,jphoto)).x
+        
+        
+        j=self.j2_2t(v_n,v2,V) 
+            
+        return (v_n,j)
+
+
 
     ###################################################################
     # constants 
@@ -174,7 +254,7 @@ class TransistorModel:
     m1=mss*(1-fc/2)
 
     js1 = 6.1e-10        # A/m  -10
-    js2 = 6.1e-7        # A/m    used to be -7  , -3 gave us the flat Vn on 0
+    js2 = 6.1e-2        # A/m    used to be -7  , -3 gave us the flat Vn on 0
     jphoto=0.          # our generation photo current
     T=300
 
